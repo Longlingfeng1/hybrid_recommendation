@@ -5,6 +5,7 @@ import java.util.Date
 import java.io.FileWriter
 
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.ml.recommendation
 import org.apache.spark.mllib.evaluation.RankingMetrics
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.mllib.recommendation.ALS
@@ -13,15 +14,15 @@ import org.apache.spark.mllib.recommendation.Rating
 import org.apache.spark.rdd.RDD
 
 import scala.collection.Map
-
+import scala.math
 
 object alsRecommender {
 
-  val trainDatapath = "data/rawLog/score_adult_nolimit_log.txt"
+  val trainDatapath = "data/noisyDelete/score_child_nolimit.txt"
   val rank = 20 // feature数量
   val numIterations = 20 //模型迭代次数
   val lambda = 0.01 //正则项参数
-  val alpha = 40 //置信度
+  val alpha = 10 //置信度
 
   def NowTime(): String = {
     val now: Date = new Date()
@@ -93,59 +94,125 @@ object alsRecommender {
 //    .foreach(println)
   }
 
-  def rankingMetrics(data:RDD[Rating], model: MatrixFactorizationModel, recNum:Int):Unit = {
-
-    val logFilePath = "rankingMetrics_" + NowTime() + ".log"
-    val fileWriter = new FileWriter(logFilePath,true)
-
+  def parameterSearch(data:RDD[Rating]):Unit = {
+    val logFilePath = "parameterSearch_" + NowTime() + ".log"
+    val fileWriter = new FileWriter(logFilePath, true)
+    //rating处理方式
+    val logRating = data.map(r=>Rating(r.user, r.product, math.log1p(r.rating))).persist()
     fileWriter
-      .write(s"输入数据:$trainDatapath\nrank=$rank\nnumIterations=$numIterations\nlambda=$lambda\nalpha=$alpha\n\n")
+      .write(s"输入数据:$trainDatapath\nrating处理方式:log1p\n") // <- 记得这里一起修改rating处理方式
 
-    // 用户的观看记录，如果阈值大于0.5就认为是感兴趣
-    val binarizedRatings = data.map(r => Rating(r.user, r.product,
-      if (r.rating > 0.5) 1.0 else 0.0)).cache()
+    val Array(trainData, testData) = data.randomSplit(Array(0.8, 0.2))
+    trainData.persist()
+    testData.persist()
+
+    val evaluations =
+      for (rank   <- Array(10, 50);
+           iterations <- Array(10, 20);
+           lambda <- Array(10, 0.01);
+           alpha  <- Array(1.0, 40.0);
+          )
+        yield {
+          val model = ALS.trainImplicit(trainData, rank, iterations, lambda, alpha)
+          val metricsRes = rankingMetrics(testData, model,20)
+          unpersist(model)
+          ((rank, iterations, lambda, alpha), metricsRes)
+        }
+
+    evaluations.foreach{ x=>
+      println(x)
+      fileWriter.write(x._1.toString()+"=>")
+      fileWriter.write(x._2+"\n")
+    }
+    fileWriter.close()
+  }
+
+  def unpersist(model: MatrixFactorizationModel): Unit = {
+    model.userFeatures.unpersist()
+    model.productFeatures.unpersist()
+  }
+
+
+  def rankingMetrics(testData:RDD[Rating], model: MatrixFactorizationModel, recNum:Int):String = {
+
+//    val logFilePath = "rankingMetrics_" + NowTime() + ".log"
+//    val fileWriter = new FileWriter(logFilePath,true)
+//
+//    fileWriter
+//      .write(s"输入数据:$trainDatapath\nrank=$rank\nnumIterations=$numIterations\nlambda=$lambda\nalpha=$alpha\n\n")
+    // 用户的观看记录映射到0，1，如果阈值大于0.5就认为是感兴趣
+
+    val binarizedRatings = testData.map(r => Rating(r.user, r.product,
+      if (r.rating > 0.5) 1.0 else 0.0)).persist()
+    // 保留原始观看记录，如果阈值大于0.5就认为是感兴趣
+    val ruiRatings = testData.filter(_.rating > 0.5).persist()
+
 
     //得到对每个用户的N个推荐结果
     val userRecommended = model.recommendProductsForUsers(recNum)
 
     //将用户的观看记录与推荐结果join，并且删去不感兴趣的节目
-    val userMovies = binarizedRatings.groupBy(_.user)
-    val relevantDocuments = userMovies.join(userRecommended).map { case (user, (actual,
+    val binarizedWatchHistory = binarizedRatings.groupBy(_.user)
+    val ruiWatchHistory = ruiRatings.groupBy(_.user).persist()
+    val coutUserNum = ruiWatchHistory.count()
+
+    //这里有可能testSet的userID是少于recommendList的，但是join操作按照少的来join，所以没问题
+    val binarizedRelevantDocuments = binarizedWatchHistory.join(userRecommended).map { case (user, (actual,
     predictions)) =>
-      (predictions.map(_.product), actual.filter(_.rating > 0.0).map(_.product).toArray)
-    }
+      (predictions.map(_.product), actual.filter(_.rating > 0.0).map(_.product).toArray) //actual 有可能为空
+    }.persist()
 
-    val metrics = new RankingMetrics(relevantDocuments)
+    //《Collaborative Filtering for Implicit Feedback Datasets》评测方式
+    val rankScore = ruiWatchHistory.join(userRecommended).map{ case(user, (actual, predictions)) =>
+      val preSum = predictions.length
+      var rateList=for(i <- 0 to preSum) yield i/preSum.toDouble
+      val productScoreMap = predictions.map(x=>x.product).zip(rateList).toMap
+      actual.map{x=>
+        val score:Double = productScoreMap.getOrElse(x.product,1)
+        score * x.rating
+      }.sum / actual.map(x=>x.rating).sum
+    }.reduce((x,y)=>x+y) / coutUserNum.toDouble
 
+
+    var resStr:String = ""
+
+    val rankScoreStr = s"rankScore = ${(rankScore * 100).formatted("%.3f")}\n"
+    println(rankScoreStr)
+    resStr += rankScoreStr
+//    fileWriter.write(rankScoreStr + "\n")
+//    fileWriter.write("\n")
+
+    val metrics = new RankingMetrics(binarizedRelevantDocuments)
     // Precision at K
     Array(1, 3, 5, 10).foreach { k =>
-      val pak = s"Precision at $k = ${metrics.precisionAt(k)}"
+      val pak = s"Precision at $k = ${metrics.precisionAt(k)}\n"
       println(pak)
-      fileWriter.write(pak+"\n")
+      resStr += pak
+//      fileWriter.write(pak+"\n")
     }
-
+//    fileWriter.write("\n")
     // MAP
-    val MAP = s"Mean average precision = ${metrics.meanAveragePrecision}"
+    val MAP = s"Mean average precision = ${metrics.meanAveragePrecision}\n"
     println(MAP)
-    fileWriter.write(MAP)
-
+    resStr += MAP
+//    fileWriter.write(MAP+"\n")
+//    fileWriter.write("\n")
     // NDCG at K
     Array(1, 3, 5, 10).foreach { k =>
-      val NDCGK = s"NDCG at $k = ${metrics.ndcgAt(k)}"
+      val NDCGK = s"NDCG at $k = ${metrics.ndcgAt(k)}\n"
       println(NDCGK)
-      fileWriter.write(NDCGK)
+      resStr += NDCGK
+//      fileWriter.write(NDCGK+"\n")
     }
-
-    //TODO:原论文评价函数
-
+    return resStr
+//    fileWriter.close()
   }
-
 
   def main(args: Array[String]): Unit = {
 
 //    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
 
-    val conf = new SparkConf().setAppName("ALS").setMaster("local")
+    val conf = new SparkConf().setAppName("ALS").setMaster("local[2]")
     val sc = new SparkContext(conf)
 
     // 加载数据
@@ -155,19 +222,21 @@ object alsRecommender {
       .collectAsMap()
     val ratings = data.map(_.split(',') match { case Array(user, item, rate) =>
       Rating(user.toInt, item.toInt, rate.toDouble)
-    }).persist()
+    })
 
+    parameterSearch(ratings)
 
-    val model = ALS.trainImplicit(ratings, rank, numIterations, lambda, alpha)
+//    val model = ALS.trainImplicit(ratings, rank, numIterations, lambda, alpha)
+//
+//    rankingMetrics(ratings, model,20)
 
-    rankingMetrics(ratings, model,20)
-
-    //    printRec(ratings,model, videoIdMapVideo,20,12000)
+//    printRec(ratings,model, videoIdMapVideo,20,12000)
 
 //    model.save(sc, "target/tmp/myCollaborativeFilter")
 //    val model = MatrixFactorizationModel.load(sc, "target/tmp/myCollaborativeFilter")
 //    model.userFeatures.persist()
 //    model.productFeatures.persist()
+//    rankingMetrics(ratings, model,20)
   }
 
 }
