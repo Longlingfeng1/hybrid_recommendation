@@ -9,3 +9,6 @@ target/
 *.log
 .ipynb_checkpoints/
 *.iml
+META-INF/
+out/
+
