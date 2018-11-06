@@ -5,7 +5,6 @@ import java.util.Date
 import java.io.FileWriter
 
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.recommendation
 import org.apache.spark.mllib.evaluation.RankingMetrics
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.mllib.recommendation.ALS
@@ -13,17 +12,19 @@ import org.apache.spark.mllib.recommendation.MatrixFactorizationModel
 import org.apache.spark.mllib.recommendation.Rating
 import org.apache.spark.rdd.RDD
 import scala.collection.Map
-import scala.math
+import org.jblas.DoubleMatrix
+
 
 object alsRecommender {
 
-  val trainDatapath = "data/noisyDelete/score_child_nolimit.txt"
+  val trainDatapath = "data/noisyDelete/score_adult_nolimit.txt"
   val rank = 20 // feature数量
-  val numIterations = 20 //模型迭代次数
+  val numIterations = 10 //模型迭代次数
   val lambda = 0.1 //正则项参数
-  val alpha = 200 //置信度
+  val alpha = 100 //置信度
 //  val logFormula = "ln(1 + x/(10^-8))"//评分处理方式，与下面的函数一起修改
   val logFormula = "log10( 1 + x )"
+  val minSimilarity = 0.3  //电影最小相似度
 
   def modifyRui(rating:Double):Double = {
 //    math.log(1 + rating / math.pow(10, -8))
@@ -39,7 +40,6 @@ object alsRecommender {
 
   //训练集，测试集生成
   def trainTestDataGen(allData:RDD[Rating]):Array[RDD[Rating]] = {
-
     //TODO:切分数据，保留一种情况test=train
 //    val Array(trainSet, testSet) = allData.randomSplit(Array(1 - testSize, testSize))
     val trainSet = allData
@@ -231,12 +231,80 @@ object alsRecommender {
 
   }
 
+  def cosineSimilarity(vector1:DoubleMatrix,vector2:DoubleMatrix):Double = {
+    return vector1.dot(vector2) / (vector1.norm2() * vector2.norm2())
+  }
+
+  def calculateAllCosineSimilarity(model: MatrixFactorizationModel, videoIdMapName:Map[String, String], numRelevent:Int): Unit = {
+
+    val logFilePath = "log/videoSimilarity_" + NowTime() + ".log"
+    val fileWriter = new FileWriter(logFilePath,true)
+
+    fileWriter
+      .write(s"输入数据:$trainDatapath\nrui处理公式:$logFormula\nrank=$rank\nnumIterations=$numIterations\nlambda=$lambda\nalpha=$alpha\n\n")
+
+    //转换movie embedding的格式
+    val productsVectorRdd = model.productFeatures
+      .map{case (videoID, factor) =>
+        val factorVector = new DoubleMatrix(factor)
+        (videoID, factorVector)
+      }
+
+    //对自身做笛卡尔积，生成一个item-item矩阵
+    val productsSimilarity = productsVectorRdd.cartesian(productsVectorRdd)
+      //不用与自身做相似度计算
+      .filter{ case ((videoID1, vector1), (videoID2, vector2)) => videoID1 != videoID2 }
+      //计算相似度
+      .map{case ((videoID1, vector1), (videoID2, vector2)) =>
+        val sim = cosineSimilarity(vector1, vector2)
+        (videoID1, videoID2, sim)
+      }
+      .filter(_._3 >= minSimilarity) //按照阈值过滤相似度过低的结果  TODO:这里的操作可能导致key丢失
+
+    val videoNum = productsSimilarity.map{case (videoID1, videoID2, sim) => videoID1}.distinct().count()
+    val videoList = productsSimilarity.map{case (videoID1, videoID2, sim) => videoID1}.distinct().take(videoNum.toInt)
+
+    val productSimDict = productsSimilarity.map{ case (videoID1, videoID2, sim) =>
+      val keyVideoID = videoID1
+      val simVideoPair = (videoID2, sim)
+      (keyVideoID, List(simVideoPair))
+    }
+      .reduceByKey((x,y) => x++y)
+      .map{ case(keyVideoID, simList) =>
+        val allSimList:List[(Int,Double)] = simList.sortBy{case (simVideoID, score) => score.toDouble}.reverse
+        var releventVideo:List[(Int,Double)] = List()
+        for(i <- allSimList.indices if i < numRelevent){
+          releventVideo = releventVideo :+ allSimList(i)
+        }
+        (keyVideoID, releventVideo)
+      }.collectAsMap()
+
+    for (videoID <- videoList){
+      val keyVideoName = videoIdMapName.getOrElse(videoID.toString, "keyError")
+
+      val simStr = (productSimDict.get(videoID)).get
+        .map{ case(simVideoID, simScore) =>
+          videoIdMapName.getOrElse(simVideoID.toString, "keyError") + "," + simScore.formatted("%.3f")}
+        .mkString("|")
+
+      val s = s"$keyVideoName:$simStr\n"
+      println(s)
+      fileWriter.write(s+"\n")
+    }
+
+    fileWriter.close()
+
+    productsVectorRdd.unpersist()
+    productsSimilarity.unpersist()
+  }
+
   def main(args: Array[String]): Unit = {
 
 //    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
 
-    val conf = new SparkConf().setAppName("ALS").setMaster("local[2]")
+    val conf = new SparkConf().setAppName("ALS").setMaster("local")
     val sc = new SparkContext(conf)
+    sc.setCheckpointDir("checkpoint")
 
     // 加载数据
     val data = sc.textFile(trainDatapath)
@@ -247,21 +315,21 @@ object alsRecommender {
       Rating(user.toInt, item.toInt, rate.toDouble)
     })
 
-    //超参搜索
-    parameterSearch(ratings)
+//    //超参搜索
+//    parameterSearch(ratings)
 
 
-//    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(ratings)
-//    trainData.persist()
-//    testDataBinary.persist()
-//    testDataRui.persist()
-//
-//    val model = ALS.trainImplicit(trainData, rank, numIterations, lambda, alpha)
+    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(ratings)
+    trainData.persist()
+    testDataBinary.persist()
+    testDataRui.persist()
+
+    val model = ALS.trainImplicit(trainData, rank, numIterations, lambda, alpha)
 //    //评测
-//    evaluate(testDataBinary,testDataRui,model)
+    evaluate(testDataBinary,testDataRui,model)
 //    //打印具体推荐结果
-//    printRec(trainData, model, videoIdMapVideo,20,12000)
-
+    printRec(trainData, model, videoIdMapVideo,20,12000)
+//    calculateAllCosineSimilarity(model, videoIdMapVideo,7)
 
 //    model.save(sc, "target/tmp/myCollaborativeFilter")
 //    val model = MatrixFactorizationModel.load(sc, "target/tmp/myCollaborativeFilter")
