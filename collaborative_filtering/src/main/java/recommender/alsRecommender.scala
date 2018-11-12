@@ -11,13 +11,14 @@ import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.mllib.recommendation.MatrixFactorizationModel
 import org.apache.spark.mllib.recommendation.Rating
 import org.apache.spark.rdd.RDD
+
 import scala.collection.Map
 import org.jblas.DoubleMatrix
 
 
 object alsRecommender {
 
-  val trainDatapath = "data/noisyDelete/score_adult_nolimit.txt"
+  val trainDatapath = "one_month_data/score_adult.txt"
   val rank = 20 // feature数量
   val numIterations = 10 //模型迭代次数
   val lambda = 0.1 //正则项参数
@@ -25,6 +26,7 @@ object alsRecommender {
 //  val logFormula = "ln(1 + x/(10^-8))"//评分处理方式，与下面的函数一起修改
   val logFormula = "log10( 1 + x )"
   val minSimilarity = 0.3  //电影最小相似度
+
 
   def modifyRui(rating:Double):Double = {
 //    math.log(1 + rating / math.pow(10, -8))
@@ -39,11 +41,18 @@ object alsRecommender {
   }
 
   //训练集，测试集生成
-  def trainTestDataGen(allData:RDD[Rating]):Array[RDD[Rating]] = {
-    //TODO:切分数据，保留一种情况test=train
-//    val Array(trainSet, testSet) = allData.randomSplit(Array(1 - testSize, testSize))
-    val trainSet = allData
-    val testSet = allData
+  def trainTestDataGen(allData:RDD[Rating], testSize:Double, isSplit:Boolean):Array[RDD[Rating]]= {
+    var trainSet:RDD[Rating] = null
+    var testSet:RDD[Rating] = null
+
+    if(isSplit){
+      val Array(train, test) = allData.randomSplit(Array(1.0 - testSize, testSize))
+      trainSet = train
+      testSet = test
+    }else{
+      trainSet = allData
+      testSet = allData
+    }
 
     val trainData = trainSet.map{ case Rating(user, product, rating) => Rating(user, product, modifyRui(rating)) }
     val testData = testSet
@@ -129,7 +138,7 @@ object alsRecommender {
     fileWriter
       .write(s"输入数据:$trainDatapath\nrui处理公式:$logFormula\n\n") // <- 记得这里一起修改rating处理方式
 
-    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(allData)
+    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(allData,0.0,false)
     trainData.persist()
     testDataBinary.persist()
     testDataRui.persist()
@@ -187,28 +196,22 @@ object alsRecommender {
       }.sum / actual.map(x=>x.rating).sum
     }.reduce((x,y)=>x+y) / countUserNum.toDouble
     val rankScoreStr = s"rankScore = ${(rankScore * 100).formatted("%.3f")}\n"
-    println(rankScoreStr)
     resStr += rankScoreStr
 
     val metrics = new RankingMetrics(binarizedRelevantDocuments)
     // Precision at K
     Array(1, 3, 5, 10).foreach { k =>
       val pak = s"Precision at $k = ${metrics.precisionAt(k)}\n"
-      println(pak)
       resStr += pak
     }
     // MAP
     val MAP = s"Mean average precision = ${metrics.meanAveragePrecision}\n"
-    println(MAP)
     resStr += MAP
-
     // NDCG at K
     Array(1, 3, 5, 10).foreach { k =>
       val NDCGK = s"NDCG at $k = ${metrics.ndcgAt(k)}\n"
-      println(NDCGK)
       resStr += NDCGK
     }
-
     //从内存中释放
     binarizedRelevantDocuments.unpersist()
     ruiWatchHistory.unpersist()
@@ -231,11 +234,12 @@ object alsRecommender {
 
   }
 
-  def cosineSimilarity(vector1:DoubleMatrix,vector2:DoubleMatrix):Double = {
-    return vector1.dot(vector2) / (vector1.norm2() * vector2.norm2())
-  }
-
   def calculateAllCosineSimilarity(model: MatrixFactorizationModel, videoIdMapName:Map[String, String], numRelevent:Int): Unit = {
+
+    //计算cosin距离
+    def cosineSimilarity(vector1:DoubleMatrix,vector2:DoubleMatrix):Double = {
+      return vector1.dot(vector2) / (vector1.norm2() * vector2.norm2())
+    }
 
     val logFilePath = "log/videoSimilarity_" + NowTime() + ".log"
     val fileWriter = new FileWriter(logFilePath,true)
@@ -259,7 +263,7 @@ object alsRecommender {
         val sim = cosineSimilarity(vector1, vector2)
         (videoID1, videoID2, sim)
       }
-      .filter(_._3 >= minSimilarity) //按照阈值过滤相似度过低的结果  TODO:这里的操作可能导致key丢失
+      .filter(_._3 >= minSimilarity)
 
     val videoNum = productsSimilarity.map{case (videoID1, videoID2, sim) => videoID1}.distinct().count()
     val videoList = productsSimilarity.map{case (videoID1, videoID2, sim) => videoID1}.distinct().take(videoNum.toInt)
@@ -301,15 +305,14 @@ object alsRecommender {
   def main(args: Array[String]): Unit = {
 
 //    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
-
     val conf = new SparkConf().setAppName("ALS").setMaster("local")
     val sc = new SparkContext(conf)
     sc.setCheckpointDir("checkpoint")
 
     // 加载数据
     val data = sc.textFile(trainDatapath)
-    val videoIdMapVideo:Map[String,String] = sc.textFile("data/t_video.txt")
-      .map(x=>(x.split("#")(0),x.split("#")(1)))
+    val videoIdMapVideo:Map[String,String] = sc.textFile("one_month_data/videos_all.txt")
+      .map(x=>(x.split(",")(0),x.split(",")(1)))
       .collectAsMap()
     val ratings = data.map(_.split(',') match { case Array(user, item, rate) =>
       Rating(user.toInt, item.toInt, rate.toDouble)
@@ -318,16 +321,15 @@ object alsRecommender {
 //    //超参搜索
 //    parameterSearch(ratings)
 
-
-    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(ratings)
+    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(ratings, 0.0, false)
     trainData.persist()
     testDataBinary.persist()
     testDataRui.persist()
 
     val model = ALS.trainImplicit(trainData, rank, numIterations, lambda, alpha)
-//    //评测
+    //评测
     evaluate(testDataBinary,testDataRui,model)
-//    //打印具体推荐结果
+    //打印具体推荐结果
     printRec(trainData, model, videoIdMapVideo,20,12000)
 //    calculateAllCosineSimilarity(model, videoIdMapVideo,7)
 
