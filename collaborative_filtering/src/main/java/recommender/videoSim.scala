@@ -1,24 +1,15 @@
 package recommender
 
-import java.text.SimpleDateFormat
-import java.util.{Date, Properties}
-import java.io.{FileInputStream, FileWriter}
-import org.apache.log4j.{Level, Logger}
-import org.apache.spark.mllib.evaluation.RankingMetrics
+import java.io.FileInputStream
+import java.util.Properties
+
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.mllib.recommendation.ALS
-import org.apache.spark.mllib.recommendation.MatrixFactorizationModel
-import org.apache.spark.mllib.recommendation.Rating
-import org.apache.spark.rdd.RDD
+import org.apache.spark.mllib.recommendation.{ALS, Rating}
+import recommender.recLib.{calculateAllCosineSimilarity, trainTestDataGen}
+
 import scala.collection.Map
-import org.jblas.DoubleMatrix
-import recLib.evaluate
-import recLib.printRec
-import recLib.trainTestDataGen
 
-
-object alsRecommender {
-
+object videoSim {
   def loadProperties():Unit = {
     val properties = new Properties()
     properties.load(new FileInputStream("ALS.properties"))
@@ -34,7 +25,7 @@ object alsRecommender {
 
   def main(args: Array[String]): Unit = {
     loadProperties()
-//    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
+    //    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
     val conf = new SparkConf().setAppName("ALS").setMaster("local[2]")
     val sc = new SparkContext(conf)
     sc.setCheckpointDir("checkpoint")
@@ -50,13 +41,9 @@ object alsRecommender {
 
     val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(ratings, 0.0, false)
     trainData.persist()
-    testDataBinary.persist()
-    testDataRui.persist()
 
     val model = ALS.trainImplicit(trainData, recConfig.rank, recConfig.numIterations, recConfig.lambda, recConfig.alpha)
-    //评测
-    evaluate(testDataBinary,testDataRui,model)
-    //打印具体推荐结果
-    printRec(trainData, model, videoIdMapVideo,20,12000)
+    calculateAllCosineSimilarity(model,videoIdMapVideo,10)
   }
+
 }

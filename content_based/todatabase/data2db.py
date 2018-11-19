@@ -1,7 +1,7 @@
 import re
 from content_based.db_client import dbclient
 from pprint import pprint
-import content_based.utils as utils
+import utils
 import sys
 import os
 
