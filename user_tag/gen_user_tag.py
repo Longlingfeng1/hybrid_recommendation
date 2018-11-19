@@ -128,7 +128,7 @@ def generate_time_tag():
             if target is not None:
                 user_tag_dict_compress[userId].append((target, day_type, active_zone))
 
-    with open('output/user_tag.txt', 'w', encoding='utf-8') as f:
+    with open('out/user_tag.txt', 'w', encoding='utf-8') as f:
         for item in user_tag_dict_compress.items():
             f.write(str(item)+'\n')
 
@@ -139,7 +139,7 @@ def generate_plot_tag():
     :return:
     '''
     video_table = {}
-    for idx, line in enumerate(open('one_month_data/videos_all.txt', 'r', encoding='utf-8')):
+    for idx, line in enumerate(open('data/one_month_data/videos_all.txt', 'r', encoding='utf-8')):
         doc = line.strip().split(',')
         video_id = int(doc[0])
         video_name = doc[1]
@@ -165,7 +165,7 @@ def generate_plot_tag():
         }
 
     user_watch_history = {}
-    for idx, line in enumerate(open('one_month_data/score_adult.txt', 'r', encoding='utf-8')):
+    for idx, line in enumerate(open('data/one_month_data/score_adult.txt', 'r', encoding='utf-8')):
         user_id, video_id, score = line.strip().split(',')
         user_id = int(user_id)
         video_id = int(video_id)
