@@ -10,6 +10,7 @@ import org.apache.spark.rdd.RDD
 import org.jblas.DoubleMatrix
 
 import scala.collection.Map
+import scala.collection.mutable.ArrayBuffer
 
 object recLib {
 
@@ -65,16 +66,18 @@ object recLib {
 
   def printRec(trainData: RDD[Rating], model: MatrixFactorizationModel, videoIdMapName:Map[String, String], recNum:Int, watchUserNum:Int): Unit = {
 
-    val logFilePath = "log/watched-recommend_" + NowTime() + ".log"
-    val fileWriter = new FileWriter(logFilePath,true)
+    //val logFilePath = "log/watched-recommend_" + NowTime() + ".log"
+    //val fileWriter = new FileWriter(logFilePath,true)
+    val logFilePath1 = "log/watched-recommend_userforranking_"+ NowTime() + ".log"
+    val fileWriter1 = new FileWriter(logFilePath1,true)
 
-    fileWriter
-      .write(s"输入数据:${recConfig.trainDataPath}\n"+
-        s"rui处理公式:${recConfig.logFormula}\n"+
-        s"rank=${recConfig.rank}\n"+
-        s"numIterations=${recConfig.numIterations}\n"+
-        s"lambda=${recConfig.lambda}\n"+
-        s"alpha=${recConfig.alpha}\n\n")
+//    fileWriter
+//      .write(s"输入数据:${recConfig.testDataPath}\n"+
+//      s"rui处理公式:${recConfig.logFormula}\n"+
+//      s"rank=${recConfig.rank}\n"+
+//      s"numIterations=${recConfig.numIterations}\n"+
+//      s"lambda=${recConfig.lambda}\n"+
+//      s"alpha=${recConfig.alpha}\n\n")
 
     val watchHistoryDict = trainData
       //每条记录转为元组
@@ -103,10 +106,14 @@ object recLib {
         .map{case (videoName, score)=>videoName+","+score.formatted("%.3f")}.mkString("|")
 
       val s = s"用户ID:$user\n历史观看:\n$watchHistory\n推荐结果:\n$recommendList\n"
+      val s1 = s"$user#$recommendList"
       println(s)
-      fileWriter.write(s+"\n")
+      //fileWriter.write(s+"\n")
+      fileWriter1.write(s1+"\n")
+
     }
-    fileWriter.close()
+    //fileWriter.close()
+    fileWriter1.close()
     //      //在分布式环境下得到对所有用户推荐结果，一次性生成全部的结果
     //    val recommendRDDTemp: RDD[(Int, Array[Rating])] = model.recommendProductsForUsers(recNum)
     //    val recommendRDD = recommendRDDTemp.map{case (userID, ratingArray) =>
@@ -126,40 +133,49 @@ object recLib {
     //    .foreach(println)
   }
 
-//  def parameterSearch(allData:RDD[Rating]):Unit = {
-//    val logFilePath = "log/parameterSearch_" + NowTime() + ".log"
-//    val fileWriter = new FileWriter(logFilePath, true)
-//    fileWriter
-//      .write(s"输入数据:$recConfig.trainDataPath\n"+
-//        s"rui处理公式:$recConfig.logFormula\n\n") // <- 记得这里一起修改rating处理方式
-//
-//    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(allData,0.0,false)
-//    trainData.persist()
-//    testDataBinary.persist()
-//    testDataRui.persist()
-//
-//    val evaluations =
-//      for (
-//        //           lambda <- Array(0.01, 1, 100);
-//        alpha  <- Array(200, 500, 1000)
-//      ) yield {
-//        val model = ALS.trainImplicit(trainData, rank, numIterations, lambda, alpha)
-//        val metricsRes = rankingMetrics(testDataBinary,testDataRui, model,20)
-//        unpersist(model)
-//        ((rank, numIterations, lambda, alpha), metricsRes)
-//      }
-//
-//    evaluations.foreach{ x=>
-//      fileWriter.write(x._1.toString()+"=>")
-//      fileWriter.write(x._2+"\n")
-//    }
-//    //从内存中释放
-//    trainData.unpersist()
-//    testDataBinary.unpersist()
-//    testDataRui.unpersist()
-//
-//    fileWriter.close()
-//  }
+  def parameterSearch(allData:RDD[Rating],allData_2:RDD[Rating]):Unit = {
+    val logFilePath = "log/parameterSearch_" + NowTime() + ".log"
+    val fileWriter = new FileWriter(logFilePath, true)
+    fileWriter
+      .write(s"输入数据:${recConfig.testDataPath}\n"+
+        s"rui处理公式:${recConfig.logFormula}\n\n") // <- 记得这里一起修改rating处理方式
+
+    val Array(trainData, testDataBinary, testDataRui) = trainTestDataGen(allData, 0, false)
+    val Array(trainData_1,testDataBinary_1,testDataRui_1) = trainTestDataGen(allData_2,0,false)
+    trainData.persist()
+    testDataBinary_1.persist()
+    testDataRui_1.persist()
+    val lambda = recConfig.lambda
+  //  val rank = recConfig.rank
+    val alpha = recConfig.alpha
+    val numIterations = recConfig.numIterations
+    val evaluations =
+      for (
+  //        lambda <- Array(0.01,0.1, 1, 10,100)
+    //    alpha  <- Array(60,70,90)
+//        numIterations <- Array(10,20,30); 10
+        rank <- Array(10) //20
+      ) yield {
+        val model = ALS.trainImplicit(trainData, rank, numIterations, lambda, alpha)
+        val metricsRes = rankingMetrics(testDataBinary_1,testDataRui_1, model,20)
+        unpersist(model)
+        ((rank, numIterations, lambda, alpha), metricsRes)
+      }
+
+    evaluations.foreach{ x=>
+      fileWriter.write(x._1.toString()+"=>")
+      fileWriter.write(x._2+"\n")
+    }
+    //从内存中释放
+    trainData.unpersist()
+    testDataBinary.unpersist()
+    testDataRui.unpersist()
+    trainData_1.unpersist()
+    testDataBinary_1.unpersist()
+    testDataRui_1.unpersist()
+
+    fileWriter.close()
+  }
 
 
   def rankingMetrics(binarizedRatings:RDD[Rating],ruiRatings:RDD[Rating], model: MatrixFactorizationModel, recNum:Int):String = {
@@ -218,7 +234,6 @@ object recLib {
 
     val logFilePath = "log/rankingMetrics_" + NowTime() + ".log"
     val fileWriter = new FileWriter(logFilePath,true)
-
     fileWriter
       .write(s"输入数据:${recConfig.trainDataPath}\n"+
         s"rui处理公式:${recConfig.logFormula}\n"+
@@ -232,6 +247,54 @@ object recLib {
     fileWriter.write(resStr)
     fileWriter.close()
 
+  }
+  //提取embedding
+  def print_feature(model: MatrixFactorizationModel): Unit ={
+    val userFeatureFile ="log/userfeature.log"
+     val productFeatureFile = "log/productfeature.log"
+     //val featureFile1 = "log/feature1.log"
+     val fileWriteruser = new FileWriter(userFeatureFile,true)
+     val fileWriterproduct = new FileWriter(productFeatureFile,true)
+
+//     val userF = model.userFeatures.map{case(id,feature)=>
+//       fileWriter.write(s"$id"+s"$feature"+"\n")
+//       (id,feature)
+//     }
+     //model.productFeatures.saveAsTextFile(featureFile1)
+    val productFeatures = model.productFeatures.collect()
+    //val productArray = ArrayBuffer[Int]()
+    //val productFeatureArray = ArrayBuffer[Array[Double]]()
+    for((product,productfeatures) <- productFeatures){
+//      productArray += product
+//      productFeatureArray += features
+      fileWriterproduct.write(product+",")
+      for(i<-productfeatures){
+        fileWriterproduct.write(String.valueOf(i)+" ")
+      }
+      fileWriterproduct.write("\n")
+    }
+
+    val userFeatures = model.userFeatures.collect()
+    for((user,userfeatures)<-userFeatures){
+      fileWriteruser.write(user+",")
+      for(i<-userfeatures){
+        fileWriteruser.write(String.valueOf(i)+" ")
+      }
+      fileWriteruser.write("\n")
+    }
+
+//    for (i <- 0 until productArray.length) {
+//      var str:String = ""
+//      str = productArray(i) + "," + productFeatureArray(i) + "\n"
+//      //fileWriter.write(str)
+//    }
+
+
+      //     fileWriter
+//       .write(s"${model.userFeatures}"
+//     )
+    fileWriteruser.close()
+    fileWriterproduct.close()
   }
 
   def calculateAllCosineSimilarity(model: MatrixFactorizationModel, videoIdMapName:Map[String, String], numRelevent:Int): Unit = {
